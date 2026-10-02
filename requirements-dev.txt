@@ -1,0 +1,5 @@
+-r fraud_detector/requirements.txt
+psycopg2-binary==2.9.13
+python-dotenv==1.2.4
+ipykernel==7.4.0
+pytest==9.1.1

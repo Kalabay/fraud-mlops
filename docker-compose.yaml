@@ -8,7 +8,7 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
-      - "2181:2181"
+      - "127.0.0.1:2181:2181"
 
   # Сервис Kafka
   kafka:
@@ -18,7 +18,7 @@ services:
     networks:
       - ml-scorer
     ports:
-      - "9095:9095"
+      - "127.0.0.1:9095:9095"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -52,7 +52,7 @@ services:
 
       echo 'Создание топиков...'
       kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transactions --partitions 3 --replication-factor 1 --config retention.ms=604800000
-      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic scoring --partitions 3 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic scores --partitions 3 --replication-factor 1 --config retention.ms=604800000
 
       echo 'Топики успешно созданы:'
       kafka-topics --bootstrap-server kafka:9092 --list
@@ -66,37 +66,81 @@ services:
     networks:
       - ml-scorer
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8081:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
 
   fraud_detector:
+    restart: on-failure
+    volumes:
+      - ./fraud_detector/train_data:/app/train_data:ro
     build: ./fraud_detector
     networks:
       - ml-scorer
     environment:
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_TRANSACTIONS_TOPIC: "transactions"
-      KAFKA_SCORING_TOPIC: "scoring"
+      KAFKA_SCORING_TOPIC: "scores"
     depends_on:
-      - kafka
-      - kafka-setup
+      kafka-setup:
+        condition: service_completed_successfully
 
   interface:
     build: ./interface
+    volumes:
+      - ./data:/app/test_data:ro
     networks:
       - ml-scorer
     environment:
       KAFKA_BROKERS: "kafka:9092"  # Используем внутренний адрес Kafka
+      DATABASE_URL: postgresql://fraud:fraud_local@postgres:5432/fraud
       KAFKA_TOPIC: "transactions"
     depends_on:
-      - kafka
+      kafka-setup:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fraud
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud_local
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - ml-scorer
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d fraud"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  score_writer:
+    build: ./score_writer
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_SCORING_TOPIC: scores
+      DATABASE_URL: postgresql://fraud:fraud_local@postgres:5432/fraud
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks:
+      - ml-scorer
+
+volumes:
+  pgdata:
 
 networks:
   ml-scorer:
-    name: ml-scorer
+    name: fraud-homework-network
     driver: bridge

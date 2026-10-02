@@ -18,7 +18,7 @@ logger.info('Pretrained model imported successfully...')
 
 def make_pred(dt, source_info="kafka"):
 
-    print(dt.dtypes)
+    dt = dt.copy()
 
     # Меняем формат категориальных фичей на string перед скорингом
     expected_categorical = ['hour',
@@ -37,9 +37,10 @@ def make_pred(dt, source_info="kafka"):
             dt[col] = dt[col].astype(str)
 
     # Calculate score
+    scores = model.predict_proba(dt, thread_count=2)[:, 1]
     submission = pd.DataFrame({
-        'score':  model.predict_proba(dt)[:, 1],
-        'fraud_flag': (model.predict_proba(dt)[:, 1] > model_th) * 1
+        'score':  scores,
+        'fraud_flag': (scores > model_th) * 1
     })
     logger.info(f'Prediction complete for data from {source_info}')
 

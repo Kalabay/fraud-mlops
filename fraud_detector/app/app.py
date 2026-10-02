@@ -1,87 +1,54 @@
+import json
 import os
 import sys
-import pandas as pd
-import time
-import logging
-import json
-from datetime import datetime
+from pathlib import Path
 
+import pandas as pd
 from confluent_kafka import Consumer, Producer, KafkaError
 
-sys.path.append(os.path.abspath('./src'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from preprocessing import load_train_data, run_preproc
 from scorer import make_pred
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/app/logs/service.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
-# Set kafka configuration file
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-TRANSACTIONS_TOPIC = os.getenv("KAFKA_TRANSACTIONS_TOPIC", "transactions")
-SCORING_TOPIC = os.getenv("KAFKA_SCORING_TOPIC", "scoring")
-
-
-class ProcessingService:
-    def __init__(self):
-        self.consumer_config = {
-            'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
-            'group.id': 'ml-scorer',
-            'auto.offset.reset': 'earliest'
-        }
-        self.producer_config = {
-             'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS
-             }
-        self.consumer = Consumer(self.consumer_config)
-        self.consumer.subscribe([TRANSACTIONS_TOPIC])
-        self.producer = Producer(self.producer_config)
-        
-        # Загрузка данных для препроцессинга
-        self.train = load_train_data()
-
-    def process_messages(self):
+def main():
+    train = load_train_data()
+    consumer = Consumer({
+        "bootstrap.servers": os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
+        "group.id": "ml-scorer",
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": False
+    })
+    producer = Producer({"bootstrap.servers": os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")})
+    consumer.subscribe([os.getenv("KAFKA_TRANSACTIONS_TOPIC", "transactions")])
+    try:
         while True:
-            msg = self.consumer.poll(1.0)
+            msg = consumer.poll(1)
             if msg is None:
                 continue
             if msg.error():
-                logger.error(f"Kafka error: {msg.error()}")
-                continue
-            try:
-                # Десериализация JSON
-                data = json.loads(msg.value().decode('utf-8'))
-
-                # Извлекаем ID и данные
-                transaction_id = data['transaction_id']
-                input_df = pd.DataFrame([data['data']])
-
-                # Препроцессинг и предсказание
-                processed_df = run_preproc(self.train, input_df)
-                submission = make_pred(processed_df, "kafka_stream")
-
-                # Добавляем ID в результат
-                submission['transaction_id'] = transaction_id
-
-                # Отправка результата в топик scoring
-                self.producer.produce(
-                    'scoring',
-                    value=submission.to_json(orient='records')
-                )
-                self.producer.flush()
-            except Exception as e:
-                logger.error(f"Error processing message: {e}")
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    continue
+                raise RuntimeError(msg.error())
+            row = json.loads(msg.value())
+            data = pd.DataFrame([row["data"]])
+            result = make_pred(run_preproc(train, data)).iloc[0]
+            print("score ready", flush=True)
+            score = {"transaction_id": str(row["transaction_id"]), "score": float(result["score"]), "fraud_flag": int(result["fraud_flag"])}
+            errors = []
+            producer.produce(
+                os.getenv("KAFKA_SCORING_TOPIC", "scores"),
+                key=score["transaction_id"],
+                value=json.dumps(score),
+                on_delivery=lambda err, message: errors.append(err) if err else None
+            )
+            if producer.flush(30) or errors:
+                raise RuntimeError("kafka send failed")
+            consumer.commit(message=msg, asynchronous=False)
+    finally:
+        consumer.close()
+        producer.flush(5)
 
 
 if __name__ == "__main__":
-    logger.info('Starting Kafka ML scoring service...')
-    service = ProcessingService()
-    try:
-        service.process_messages()
-    except KeyboardInterrupt:
-        logger.info('Service stopped by user')
+    main()

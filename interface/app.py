@@ -1,3 +1,5 @@
+import altair as alt
+from results import load_results
 import streamlit as st
 import pandas as pd
 from kafka import KafkaProducer
@@ -41,7 +43,7 @@ def send_to_kafka(df, topic, bootstrap_servers):
                 topic, 
                 value={
                     "transaction_id": row['transaction_id'],
-                    "data": row.drop('transaction_id').to_dict()
+                    "data": json.loads(row.drop('transaction_id').to_json())
                 }
             )
             progress_bar.progress((idx + 1) / total_rows)
@@ -100,3 +102,24 @@ if st.session_state.uploaded_files:
                             st.rerun()
                 else:
                     st.error("Файл не содержит данных")
+
+st.header("Результаты")
+if st.button("Посмотреть результаты"):
+    try:
+        fraud, scores = load_results(os.environ["DATABASE_URL"])
+        st.subheader("10 последних фродовых событий")
+        if fraud.empty:
+            st.info("Фродовых событий пока нет")
+        else:
+            st.dataframe(fraud, hide_index=True, use_container_width=True)
+        st.subheader("Скоры последних 100 транзакций")
+        if scores.empty:
+            st.info("Данных пока нет")
+        else:
+            chart = alt.Chart(scores).mark_bar().encode(
+                x=alt.X("score:Q", bin=alt.Bin(step=0.1, extent=[0, 1]), title="Скор"),
+                y=alt.Y("count():Q", title="Количество")
+            )
+            st.altair_chart(chart, use_container_width=True)
+    except Exception:
+        st.error("Ошибка чтения базы")

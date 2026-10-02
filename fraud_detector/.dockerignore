@@ -1,0 +1,7 @@
+.venv
+__pycache__
+*.pyc
+*.log
+.git
+
+train_data
